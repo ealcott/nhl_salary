@@ -1,0 +1,455 @@
+---
+title: "NHL Player Salary - Analysis & Prediction"
+author: "Erin Alcott"
+date: "2023-08-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# **CONCLUSIONS**
+
+For this project, I wanted to learn more about NHL player salary. I explore salary in the context of different determinants, including country, US city, draft year, and team. I also use a random forest regression model to predict salary and identify the most important features in prediction. 
+
+Note: see the data source (https://www.kaggle.com/datasets/camnugent/predict-nhl-player-salaries) for a complete list of column names and their abbreviations. 
+
+The median salary overall was `$`925,000. The maximum salary was `$`13,800,000, and the minimum was `$`575,000. Left-handed players are paid slightly more than right-handed players, with a 75th percentile salary nearly 13% higher. However, some of this difference might be attributed to more left-handed players being present in the dataset. Canada and the US had at least one player receiving the maximum salary. The US median matches the overall median, and the Canada median is `$`950,000. Seeing relatively high median salaries are the US cities of Madison, Minneapolis, and St. Paul, each matching or surpassing `$`4,000,000. Ann Arbor matches the overall median, and Detroit just falls short of it. 
+
+Among the most important determining features are date of birth (age), draft year, time on ice divided by games played, team goals while player on ice, and team shots on goal while player on ice. The random forest regression model predicts salary with a mean absolute error of around `$`1,000,000, which is about 8% of the overall range. The root mean square error is around `$`1,600,000, which is close to 12% of the overall range. 
+
+Improved feature engineering and feature selection might potentially increase the accuracy of this model further. Some columns could be split up into separate columns (e.g.: date of birth into year of birth, month, etc.), and some could be eliminated due to similarity (e.g.: CF (team's shot attempts while player on ice), FF (team's unblocked attempts while player on ice), SF (team's shots on goal while player on ice)). An ensemble method might be useful as well. With three models created (one with all columns, one with negative importance columns removed, and one with a hyperparameter-tuned second model), accuracy improved primarily in the ten thousands range. The set of "important features," as determined by IncNodePurity and %IncMSE charts, remained relatively consistent throughout model improvement. 
+
+```{r unpack, echo=FALSE}
+rm(list=ls())
+suppressWarnings({
+  library(ggplot2)
+  })
+setwd("C:\\Users\\eaalc\\OneDrive - Umich\\hockey_salary\\archive (11)")
+
+```
+
+```{r unpack2, echo=TRUE}
+salary_data <- read.csv("train.csv")
+head(salary_data)
+
+```
+# Data Exploration
+
+There are over 150 columns in this dataset, meaning the correlation heatmap for the full dataset will be hard to read. Regardless, I'll make one as a big-picture starting point. I'll also make a pairplot. 
+
+```{r explore, echo=TRUE}
+suppressWarnings({
+  library(tidyr)
+  library(corrplot)
+  library(dplyr)
+  })
+print(ncol(salary_data))
+print(unique(colnames(salary_data)))
+salary_data_numeric <- salary_data %>% mutate_if(~ !is.numeric(.), ~ as.numeric(factor(.)))
+salary_data_numeric <- salary_data_numeric %>% drop_na()
+
+print(paste("Salary Data Rows: ", nrow(salary_data)))
+print(paste("Salary Data Rows, n/a rows excluded: ", nrow(salary_data_numeric)))
+
+```
+
+Below is focused exploration on salary.
+
+```{r salary, echo=TRUE}
+
+ggplot(mapping=aes(x=Salary), data=salary_data_numeric) +
+  geom_histogram(aes(fill=factor(Salary)), show.legend = FALSE, bins=35) +
+  labs(title = "Salary Histogram")
+
+ggplot(mapping=aes(x=Salary), data=salary_data_numeric) +
+  geom_density(color="darkred", show.legend=FALSE) +
+  labs(title = "Salary Density Plot")
+
+ggplot(mapping=aes(y=Salary), data=salary_data_numeric) +
+  geom_boxplot(color="darkred", show.legend=FALSE) +
+  labs(title = "Salary Box Plot")
+
+print(summary(salary_data_numeric$Salary))
+
+
+```
+
+```{r explore2, echo=TRUE}
+res <- cor(salary_data_numeric, method="kendall")
+corrplot(res, tl.cex=0.3, na.label.col="snow",
+         method="color")
+
+```
+
+As expected, only some columns have Kendall correlations with Salary. Let's select the columns with a correlation greater than 0.35. 
+
+```{r find_greater, echo=TRUE}
+greater_35_corr_vars <- colnames(res[, abs(res["Salary",]) > 0.35])
+greater_35_corr_vars <- greater_35_corr_vars[!is.na(greater_35_corr_vars)]
+print(greater_35_corr_vars)
+
+```
+
+```{r summary, echo=TRUE}
+salary_dnc <- salary_data_numeric %>% select(all_of(greater_35_corr_vars))
+summary(salary_dnc)
+```
+
+
+This is a little more legible, but still hard to decipher which variables have the strongest correlation with salary. We can take a quick look at the correlation colors present in the top row of the map. As far as salary goes, there are a lot of so-so, sky blue correlations; none seem to be a darker shade of blue. There also appears to be stronger correlations between some indicator variables, as shown by the presence of darker colored squares in the heatmap. 
+
+```{r correlation_narrow, echo=TRUE}
+res_35greater <- cor(salary_dnc, method="kendall")
+corrplot(res_35greater, na.label="square", na.label.col="snow", tl.cex = 0.5,
+         method="color")
+
+```
+
+
+Finally, let's take an up-close look at variables with the strongest correlations. There are six variables with correlation scores greater than 0.5. 
+
+```{r find_greatest, echo=TRUE}
+strongest_cols <- colnames(res[, abs(res["Salary",]) > 0.5])
+strongest_cols <- strongest_cols[!is.na(strongest_cols)]
+print(strongest_cols)
+```
+
+
+```{r summary2, echo=TRUE}
+salary_most_cut <- salary_data_numeric %>% select(all_of(strongest_cols))
+summary(salary_most_cut)
+```
+The six variables are CF (team's shot attempts while player on ice), FF (team's unblocked attempts while player on ice), SF (team's shots on goal while player on ice), xGF (team's expected goals while player on ice, by attempts by location), SCF (team's scoring chances while player on ice), and GF (team's goals while player on ice). 
+
+Since a lot of these variables are similar or related, it makes sense that there is a high correlation score between them. 
+
+```{r correlation_more_narrow, echo=TRUE}
+res_cut2 <- cor(salary_most_cut, method="kendall")
+corrplot(res_cut2, na.label="square", tl.cex = 1, addCoef.col="white", method="color")
+
+```
+Here are scatterplots for these six variables. A linear regression line is included. These variables may or may not have a linear correlation, but rather an exponential correlation, polynomial, simple monotonic relationship, etc. The linear line helps compare overall shapes and positive trends in an exploratory chapter. Included is a pairplot with histograms on the diagonals. 
+
+```{r lin_reg, echo=TRUE}
+for (variable in colnames(salary_most_cut)) {
+  print(ggplot(mapping=aes(y=salary_most_cut$Salary, x=salary_most_cut[[variable]])) +
+  geom_point(color="red") +
+  geom_smooth(method="lm", formula = y ~ x, color="darkred") +
+  labs(title = paste("Salary vs.", variable),
+       x = variable,
+       y = "Salary"))
+}
+
+#from R help page
+#help(pairs)
+panel.hist <- function(x, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(usr[1:2], 0, 1.5) )
+    h <- hist(x, plot = FALSE)
+    breaks <- h$breaks; nB <- length(breaks)
+    y <- h$counts; y <- y/max(y)
+    rect(breaks[-nB], 0, breaks[-1], y, col = "red", ...)
+}
+
+pairs(salary_most_cut, diag.panel = panel.hist)
+
+
+
+```
+Here are some graphs related to salary. One explores the relationship between salary and team goals while the player was on ice. Another shows a scatterplot between salary and goals scored by the player themself. Both of these scatterplots separate points into two color groups -- one for left-handed players and another for right-handed. Finally, there is a boxplot of salary for left-handed and for right-handed players. 
+
+Interestingly, there are more left-handed players in the dataset than right-handed. There doesn't seem to be a significant trend on the scatterplots, however, it is interesting that three out of the top five salaries are given to left-handed players. The boxplots show that the median salary for both left- and right-handed players is the same (925,000), but the IQR (3,087,750), upper fence (7,500,000), and maximum (including outliers) (13,800,000) are higher for left-handed players are larger than those for right-handed players (2,582,500; 7,000,000; 12,000,000 respectively). The 75th percentile salary is nearly 13% higher for left-handed players than right-handed. 
+
+```{r fun_graphs, echo=TRUE}
+suppressWarnings({library(plotly)})
+sd_left <- salary_data[salary_data$Hand == "L",]
+sd_right <- salary_data[salary_data$Hand == "R",]
+
+ggplot(mapping=aes(x=Hand), data=salary_data) +
+  geom_bar(fill = c("darkred", "red")) +
+  labs(title = "Dominant Hand Bar Chart")
+
+ggplot(mapping=aes(y=Salary, x=GF, color=factor(Hand)), data=salary_data) +
+  geom_point(na.rm=TRUE) +
+  scale_color_manual(values=c("darkred", "red")) +
+  labs(title = "Salary vs. Team Goals while Player on Ice (GF) - Right/Left Handed") +
+  geom_smooth(method="lm", formula = y ~ x, data=sd_left, color = "darkred", na.rm=TRUE) +
+  geom_smooth(method="lm", formula = y ~ x, data=sd_right, color="red", na.rm=TRUE)
+
+ggplot(mapping=aes(y=Salary, x=G, color=factor(Hand)), data=salary_data) +
+  geom_point(na.rm=TRUE) +
+  scale_color_manual(values=c("darkred", "red")) +
+  labs(title = "Salary vs. Team Goals while Player on Ice (GF) - Right/Left Handed") +
+  geom_smooth(method="lm", formula = y ~ x, data=sd_left, color = "darkred") +
+  geom_smooth(method="lm", formula = y ~ x, data=sd_right, color="red")
+
+hand_plot <- ggplot(mapping=aes(y=Salary, x=Hand), data=salary_data) +
+  geom_boxplot(fill = c("darkred", "red"), show.legend=FALSE) + 
+  #scale_color_manual(values = c("darkred", "red")) +
+  labs(title = "Boxplots of Salary by Dominant Hand") + 
+  theme(axis.text.x = element_text(angle=90))
+ggplotly(hand_plot)
+
+
+```
+Below are the same graphs, but this time, color groups are separated by country. 
+```{r fungraphs1_2, echo=TRUE}
+
+ggplot(mapping=aes(y=Salary, x=GF, color=factor(Cntry)), data=salary_data) +
+  geom_point(na.rm=TRUE) +
+  labs(title = "Salary vs. Team Goals while Player on Ice (GF) - Country")
+
+ggplot(mapping=aes(y=Salary, x=G, color=factor(Cntry)), data=salary_data) +
+  geom_point(na.rm=TRUE) +
+  labs(title = "Salary vs. Team Goals while Player on Ice (GF) - Country")
+
+
+```
+Here is a boxplot for salary by country, and another which breaks the prior graph into dominant hand groups. With 291 players, Canada has the most players in the dataset by far. Canada is followed by the US with 168. Canada and the US both pay the maximum salary in the dataset (13,800,000) to at least one of their players, and Canada pays the highest right-handed salary (12,000,000) as well. Many countries have higher median values for left-handed players than right-handed, although this could be due to more left-handed players appearing in the dataset.  
+
+```{r fungraphs1_3, echo=TRUE}
+
+cntry_bar <- ggplot(mapping=aes(x=Cntry), data=salary_data) +
+  geom_bar(mapping=aes(fill=factor(Cntry)), show.legend=FALSE) +
+  labs(title = "Distribution of Countries") +
+  theme(axis.text.x = element_text(angle=90))
+ggplotly(cntry_bar)
+
+cntry_sal <- ggplot(mapping=aes(y=Salary, x=Cntry), data=salary_data) +
+  geom_boxplot(mapping=aes(fill=factor(Cntry))) + 
+  labs(title = "Boxplots of Salary by Country")
+ggplotly(cntry_sal)
+
+cntry_sal_hand <- ggplot(mapping=aes(x=Cntry, y=Salary), data=salary_data) +
+  geom_boxplot(mapping=aes(fill=factor(Cntry))) + 
+  labs(title = "Boxplots of Salary by Country - Dominant Hand") + 
+  theme(axis.text = element_text(angle=90)) +
+  facet_wrap(~Hand) 
+ggplotly(cntry_sal_hand)
+
+
+```
+Here's a summary of salary in the USA. 
+
+```{r fungraphs2, echo=TRUE}
+sd_usa <- salary_data[salary_data$Cntry == "USA",]
+summary(sd_usa$Salary)
+
+```
+Below is a distribution graph of US cities in the dataset and boxplots of salary by US city. Because there are many cities in the dataset, I made these plots interactive, so that zooming in and out and moving around the graph would be possible.
+
+Ann Arbor, Madison, and Rochester have the most players in the dataset, followed by Buffalo, Minneapolis, and Pittsburgh. The majority of US cities in the dataset include data for one player. 
+
+The US player receiving the maximum salary (13,800,000) is from Buffalo, a city with a median salary of 1,587,500. Ann Arbor's median salary matches the country's median of 925,000, while Detroit fell short at 842,500. Madison had a median of 4,000,000, St. Paul 5,000,000, and Minneapolis 6,500,000.
+
+```{r usa_graphs2, echo=TRUE}
+plot1 <- ggplot(mapping=aes(x=City), data=sd_usa) +
+  geom_bar(mapping=aes(fill=factor(City)), show.legend=FALSE) +
+  labs(title = "Distribution of US Cities") +
+  theme(axis.text.x = element_text(angle=90),
+        axis.text = element_text(size=5))
+ggplotly(plot1)
+
+plot2 <- ggplot(mapping=aes(y=Salary, x=City), data=sd_usa) +
+  geom_boxplot(mapping=aes(fill=factor(City)), show.legend=FALSE) +
+  labs(title = "Boxplots of Salary by US City") + 
+  theme(axis.text.x = element_text(angle=90),
+        axis.text = element_text(size=5))
+ggplotly(plot2)
+
+```
+
+Here are some plots exploring salary by team and draft year. 
+
+```{r team_and_age, echo=TRUE}
+
+ggplot(mapping=aes(x=Team), data=sd_usa) +
+  geom_bar(mapping=aes(fill=factor(Team)), show.legend=FALSE) +
+  labs(title = "Distribution of US Teams") +
+  theme(axis.text.x = element_text(angle=90))
+
+ggplot(mapping=aes(y=Salary, x=Team), data=salary_data) +
+  geom_boxplot(mapping=aes(fill=factor(Team)), show.legend=FALSE) + 
+  labs(title = "Boxplots of Salary by Team") + 
+  theme(axis.text.x = element_text(angle=90),
+        axis.text = element_text(size=5))
+
+ggplot(mapping=aes(x=DftYr), data=sd_usa) +
+  geom_bar(mapping=aes(fill=factor(DftYr)), show.legend=FALSE, na.rm=TRUE) +
+  labs(title = "Distribution of Draft Year in US") +
+  theme(axis.text.x = element_text(angle=90))
+
+ggplot(mapping=aes(y=Salary, x=DftYr), data=salary_data) +
+  geom_boxplot(mapping=aes(fill=factor(DftYr)), show.legend=FALSE, na.rm=TRUE) + 
+  labs(title = "Boxplots of Salary by Draft Year") + 
+  theme(axis.text.x = element_text(angle=90))
+
+
+
+```
+
+# Random Forest Regression
+
+In this section, I want to use random forest regression to identify the most important determinants of salary. I will use feature selection and hyperparameter tuning to increase the accuracy of the model.
+
+```{r unpack_test, echo=TRUE}
+setwd("C:\\Users\\eaalc\\OneDrive - Umich\\hockey_salary\\archive (11)")
+y_train_data <- read.csv("test.csv")
+y_test_data <- read.csv("test_salaries.csv")
+
+#y_train_data is original csv, with all predictor columns
+#y_train_test_data will include the salary column in y_test_data
+y_train_test_data <- y_train_data
+y_train_test_data$Salary <- y_test_data$Salary
+
+#drop na values in all of y, so that salary is dropped with null predictor values
+y_train_test_data <- y_train_test_data %>% drop_na()
+
+#only using salary from y_train_test_data. drop na values from y_train_data
+y_train_data <- y_train_data %>% drop_na()
+
+library(randomForest)
+suppressWarnings({library(randomForestExplainer)})
+
+```
+
+## All Columns of Original
+Achieved mean absolute error (MAE) of `$`1,088,142 and root mean square error (RMSE) of `$`1,609,394. Identified as most important determining factors are date of birth, draft year, time on ice divided by games played (TOI.GP), and team shots on goal while the player was on ice (SF). 
+
+The output of this model shows a variety of different visualizations and text. The first block shows a summary of the model, prints the MAE and RMSE, and prints the importance of model features in descending order. The "Predicted vs. Actual" scatterplot shows how predicted values compare to actual values. The closer these points are to the line y=x, the better the predictions fared. "rf_results" shows how error in the model changed with number of trees used. This is useful in understanding over- and under-fitting of the random forest to the training dataset. Finally, and most importantly, the final graph prints the Top 10 most important model features as measured by IncNodePurity and %IncMSE. 
+
+```{r randomForest, echo=TRUE}
+set.seed(123)
+salary_data <- salary_data %>% drop_na()
+rf_results <- randomForest(Salary ~ ., data=salary_data, localImp=TRUE)
+```
+
+```{r predict, echo=TRUE}
+summary(rf_results)
+#generate predictions with y_train_data
+rf_predictions <- predict(rf_results, y_train_data)
+
+#getting salary from y_train_test_data and storing in variable name real_ytest
+real_ytest <- y_train_test_data$Salary
+
+ggplot(mapping=aes(y=real_ytest, x=rf_predictions)) +
+  geom_point(color="darkred") +
+  labs(title = "Predicted Salary vs. Actual",
+       x = "Predicted Salary",
+       y = "Actual Salary") +
+  geom_abline(intercept=0, slope=1, color="red")
+
+suppressWarnings({library(Metrics)})
+print(paste("MEAN ABSOLUTE ERROR:", mae(rf_predictions, real_ytest)))
+print(paste("ROOT MEAN SQUARED ERROR:", rmse(rf_predictions, real_ytest)))
+
+plot(rf_results)
+
+varImpPlot(rf_results, sort=TRUE, n.var = 10,
+                          main = "Top 10 Variables used in RF Model", pch=19,
+           color="darkred")
+
+
+print(sort(importance(rf_results)[,1], decreasing=TRUE))
+feature_importances <- c(sort(importance(rf_results)[,1], decreasing=TRUE))
+
+
+```
+
+## Cut Weakest Columns
+While I still see columns that may be creating noise in the model (e.g.: first name), I will cut the negative importance columns. 
+
+After cutting the noisy columns, this model achieved a MAE of `$`1,076,131 and RMSE of `$`1,603,168. The overall set of important features remained very similar, however, the IncNodePurity chart increased the importance level of Draft Year and team goals scored while player on ice (GF).
+
+```{r results_print_abstraction, echo=TRUE}
+print_rf_results <- function(model, ytrain_data, ytest_data) {
+  print(summary(model))
+  rf_predicted <- predict(model, ytrain_data)
+  ggplot(mapping=aes(y=ytest_data, x=rf_predicted)) +
+    geom_point(color="darkred") +
+    labs(title = "Predicted Salary vs. Actual",
+         x = "Predicted Salary",
+         y = "Actual Salary") +
+    geom_abline(intercept=0, slope=1, color="red")
+
+print(paste("MEAN ABSOLUTE ERROR:", mae(rf_predicted, ytest_data)))
+print(paste("ROOT MEAN SQUARED ERROR:", rmse(rf_predicted, ytest_data)))
+plot(model)
+varImpPlot(model, sort=TRUE, n.var = 10,
+                          main = "Top 10 Variables used in RF Model", pch=19,
+           color="darkred")
+
+print(sort(importance(model)[,1], decreasing=TRUE))
+feature_importances <- c(sort(importance(model)[,1], decreasing=TRUE))
+
+return(feature_importances)
+  
+}
+
+```
+
+```{r cutweak, echo=TRUE}
+#getting rid of features with negative importance and storing in variable 
+#"important_features"
+important_features <- feature_importances[feature_importances > 0]
+
+#subsetting salary_data to get all important features
+X_train <- salary_data %>% select(all_of(names(important_features)))
+#including salary column in the one dataset
+X_train$Salary <- salary_data$Salary
+
+#X_train has ALL predictor values as well as the Salary column. It functions as 
+#X_train and X_test. 
+
+#subsetting y_train_data to get all important features
+y_train <- y_train_data %>% select(all_of(names(important_features)))
+#storing salary column of y_train_test into y_test -- since important_features only drops
+#columns, y_train_test_data should be fine as is
+y_test <- y_train_test_data$Salary
+
+```
+
+```{r rf_cutweak, echo=TRUE}
+rf_resultsNW <- randomForest(Salary ~ ., data=X_train, localImp=TRUE)
+
+```
+
+```{r print_cutweak, echo=TRUE}
+feature_importancesNW <- print_rf_results(rf_resultsNW, y_train, y_test)
+```
+# Hyperparameter Tuning & Cross-Validation: Caret & Mtry
+With hyperparameter tuning, this model saw slight improvements in MAE and RMSE. The overall set of important features remained close to the same. 
+
+```{r tune, echo=TRUE}
+library(caret)
+set.seed(123)
+control <- trainControl(method="repeatedcv", number = 5, repeats = 3)
+print(ncol(X_train))
+
+grid <- expand.grid(.mtry = seq(35,125, by = 15)) #default is (#predictors)/3, which would be 127/3, which is just over 42
+
+trained_rf <- train(
+Salary~., 
+data=X_train, 
+trControl=control,
+tuneGrid = grid,
+method = "rf",
+tuneLength = 5)
+
+print(trained_rf)
+print(trained_rf$finalModel)
+  
+
+  
+finalModel <- randomForest(Salary ~., data = X_train, localImp = TRUE, mtry = 85, ntree = 500)
+
+print_rf_results(finalModel, y_train, y_test)
+
+  
+
+  
+
+```
